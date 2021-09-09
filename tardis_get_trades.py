@@ -1,4 +1,9 @@
 import argparse
+from feather_helpers import FeatherInfo
+
+from tardis_request import DownloadRequest, TardisGenerator
+from feather_helpers import write_feather_frame
+
 import pandas as pd
 import numpy as np
 import time
@@ -6,15 +11,12 @@ from dateutil import tz
 
 # process tardis messages
 import asyncio
-from tardis_client import TardisClient, Channel
 
 # i/o
 import os
 import ujson
 import json
 import gzip
-import pyarrow.feather as feather
-from pathlib import Path
 
 # normalization dictionary in separate file to keep code cleaner
 from tardis_msg_normalization import *
@@ -29,38 +31,6 @@ default_cache_dir = config('CACHE_DIR')
 msg_thrsh_process_file_by_file = 1000000
 
 ### Helper Functions
-
-def setup_tardis_request(exch, dl_date, dl_dtype, dl_symbols, cache_dir_root, tardis_key):
-    """
-    Currently hardcoded to get one day worth of data
-    Creates separate cache directory for each download 
-    
-    Returns dictionary {'cache_dir':_,'data_async_gen':_}    
-    """
-    
-    # Create Cache Directory For Download
-    
-    cur_time_str = pd.Timestamp.now().strftime('%Y%m%d%H%M%S')
-    new_cache_dir_lbl = exch + pd.Timestamp(dl_date).strftime('%Y%m%d') + '_' + cur_time_str
-    cache_dir_full_path = Path(cache_dir_root) / new_cache_dir_lbl
-    os.makedirs(cache_dir_full_path)
-    print('New Root Directory For Tardis Data: ' + str(cache_dir_full_path))
-
-    # Tardis API Request
-
-    from_date_str = pd.Timestamp(dl_date).strftime('%Y-%m-%d')
-    to_date_str = (pd.Timestamp(dl_date)+pd.Timedelta(days=1)).strftime('%Y-%m-%d')
-
-    tardis_client = TardisClient(api_key=tardis_key,cache_dir=cache_dir_full_path)
-    messages = tardis_client.replay(
-            exchange=exch,
-            from_date=from_date_str,
-            to_date=to_date_str,
-            filters=[Channel(name=dl_dtype, symbols=dl_symbols)],
-        )
-    
-    return {'cache_dir_full_path': cache_dir_full_path,
-            'data_async_gen': messages}    
 
 def format_houbi_ch_field(ch_field_str):
     if ch_field_str.startswith('market.') & ch_field_str.endswith('.trade.detail'):
@@ -234,7 +204,8 @@ def tardis_parse_zip_dir_and_cache_into_arr(dir_path, exch, dl_date):
 
     # Save as (intermediate) Feather file
     feather_save_path = dir_path + 'trd_tmp_'+pd.Timestamp(dl_date).strftime('%Y%m%d')
-    feather.write_feather(df_result, feather_save_path, compression='lz4')
+    feather_info = FeatherInfo(feather_save_path, "lz4")
+    write_feather_frame(feather_info, df_result)
         
 def tardis_parse_root_cache_dir(root_cache_dir, exch, dl_date):   
     """
@@ -263,7 +234,8 @@ def tardis_parse_root_cache_dir(root_cache_dir, exch, dl_date):
     
     df_result = pd.concat(df_list)
     feather_save_path = root_cache_dir + 'trd_'+pd.Timestamp(dl_date).strftime('%Y%m%d')    
-    feather.write_feather(df_result, feather_save_path, compression='lz4')
+    feather_info = FeatherInfo(feather_save_path, "lz4")
+    write_feather_frame(feather_info, df_result)
     
     print('Done Saving Aggregated DataFrame As Feather File: ')
     print('-> output path: '+feather_save_path)
@@ -302,12 +274,10 @@ def main():
 
     # Create Tardis Trade Request
 
-    tardis_req_info = setup_tardis_request(exch=exch, dl_date=dl_date, 
-        dl_dtype=dl_dtype, dl_symbols=dl_symbols, 
-        cache_dir_root=cache_dir_root, tardis_key=tardis_key)
-
-    cache_dir_full_path = tardis_req_info['cache_dir_full_path']
-    messages = tardis_req_info['data_async_gen']
+    request = DownloadRequest(dl_date, exch, dl_dtype, dl_symbols, cache_dir_root, api_key)
+    generator = TardisGenerator(request)
+    messages = generator.messages
+    cache_dir_full_path = generator.path
 
     # Cache & Count Messages
 
@@ -387,7 +357,8 @@ def main():
         t2 = time.time() 
 
         feather_save_path = cache_dir_full_path / ('trd_'+pd.Timestamp(dl_date).strftime('%Y%m%d'))
-        feather.write_feather(df_result, feather_save_path, compression='lz4')
+        feather_info = FeatherInfo(feather_save_path, "lz4")
+        write_feather_frame(feather_info, df_result)
         print('Done Saving Aggregated DataFrame As Feather File: ')
         print('-> output path: '+ str(feather_save_path))
         print('-> # of rows: '+str(len(df_result)))
